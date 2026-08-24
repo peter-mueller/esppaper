@@ -1,19 +1,20 @@
 package main
 
 import (
-	"image/color"
 	"log/slog"
 	"machine"
 	"os"
 	"time"
 
 	"github.com/peter-mueller/esppaper/crowpanel579"
+	"github.com/peter-mueller/esppaper/networklink"
+	"github.com/soypat/lneto/http/httphi"
 )
 
 var (
 	wlanSSID       string
 	wlanPassphrase string
-	serverPort     string = "80"
+	hostname       string
 )
 
 type Device struct {
@@ -30,6 +31,7 @@ func NewEpaper() crowpanel579.CrowPanel579 {
 	// 1. Configure the shared SPI bus
 	return crowpanel579.NewCrowPanel579(
 		machine.SPI0,
+		machine.GPIO7,  // Power
 		machine.GPIO45, // Chip Select 1
 		machine.GPIO46, // Data/Command Control
 		machine.GPIO47, // Hardware Reset
@@ -40,66 +42,73 @@ func NewEpaper() crowpanel579.CrowPanel579 {
 func main() {
 	slog.Info("Starting Device")
 
-	pwrPin := machine.GPIO7
-	pwrPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
-	pwrPin.High()
-	time.Sleep(100 * time.Millisecond)
-
 	device := Device{
 		Epaper: NewEpaper(),
 	}
-
+	device.Epaper.Power(true)
 	device.Epaper.Configure()
-	for x := int16(0); x < crowpanel579.Width; x++ {
-		for y := int16(0); y < crowpanel579.Height; y++ {
-			c := color.Gray{}
-			if y%8 < 4 {
-				c = color.Gray{0xFF}
-			}
-			device.Epaper.SetPixel(x, y, c)
+	device.Epaper.Power(false)
+
+	networkLink := networklink.NetworkLink{
+		SSID:       wlanSSID,
+		Passphrase: wlanPassphrase,
+		Hostname:   hostname,
+	}
+
+	err := networkLink.Connect()
+	mustNil("Failed to connect NetworkLink", err)
+
+	addr, err := networkLink.Address()
+	mustNil("No NetworkLink Address", err)
+	slog.Info("Connected to Wifi", "SSID", networkLink.SSID, "addr", addr.String())
+
+	var http httphi.MuxSlice
+	http.Handle("POST /epaper", device.postEpaper)
+
+	var router httphi.Router
+	cfg := httphi.DefaultRouterConfig(1, 2048, http.MaxPathValues())
+	mustNil("configuring Router", router.Configure(&http, cfg))
+	mustNil("listen and serve", networkLink.ListenAndServe(&router, 80))
+}
+
+func (device *Device) postEpaper(exch *httphi.Exchange) {
+	size, present, err := exch.RequestContentLength()
+	if err != nil {
+		slog.Error("failed to read Content-Legth", "err", err)
+		exch.WriteHeader(httphi.StatusInternalServerError)
+		return
+	}
+	if !present {
+		exch.WriteBodyString("Content-Length must be present")
+		exch.WriteHeader(httphi.StatusBadGateway)
+		return
+	}
+	body := make([]byte, size)
+	exch.ReadBody(body)
+	slog.Info("Displaying Image with Text", "size", size)
+
+	img := DrawText(string(body), 12)
+	exch.WriteHeader(httphi.StatusOK)
+
+	device.displayImage(img)
+}
+
+func (d *Device) displayImage(img *Image) {
+	d.Epaper.Power(true)
+	defer d.Epaper.Power(false)
+
+	time.Sleep(10 * time.Millisecond)
+
+	bounds := img.Bounds()
+	for x := 0; x < crowpanel579.Width && x < bounds.Max.X; x++ {
+		for y := 0; y < crowpanel579.Height && y < bounds.Max.Y; y++ {
+			d.Epaper.SetPixel(int16(x), int16(y), img.GrayAt(x, y))
 		}
 	}
-	device.Epaper.Display()
+	d.Epaper.Display()
+	time.Sleep(100 * time.Millisecond)
 
-	time.Sleep(5 * time.Second)
-
-	/**
-		networkLink := NetworkLink{
-			SSID:       wlanSSID,
-			Passphrase: wlanPassphrase,
-		}
-
-		err := networkLink.Connect()
-		mustNil("Connect NetworkLink", err)
-		slog.Info("Connected to Wifi", "SSID", networkLink.SSID)
-
-		var mux httphi.MuxSlice
-		mux.Handle("/", func(exch *httphi.Exchange) {
-			exch.RespondString(200, "application/json", `{"message":"hello"}`)
-		})
-		mux.Handle("POST /epaper", device.PostEpaper)
-		var router httphi.Router
-		cfg := httphi.DefaultRouterConfig(4, 2048, 8)
-		err = router.Configure(&mux, cfg)
-		mustNil("Configure Router", err)
-		defer router.Shutdown()
-
-		addr, err := networkLink.Address()
-		mustNil("NetworkLink Address", err)
-
-		slog.Info("Starting Webserver", "addr", addr.String(), "port", serverPort)
-		err = networkLink.ListenAndServe(&router, serverPort)
-		mustNil("NetworkLink ListenAndServe", err)
-	**/
 }
-
-/*
-func (d *Device) PostEpaper(ex *httphi.Exchange) {
-	slog.Info("POST /epaper")
-	var bin []byte
-	ex.ReadBody(bin)
-}
-*/
 
 func mustNil(msg string, v error) {
 	if v != nil {

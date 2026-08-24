@@ -32,6 +32,7 @@ const (
 type CrowPanel579 struct {
 	bus drivers.SPI
 
+	pwr  machine.Pin // Power Display On/Off
 	cs   machine.Pin // Chip Select
 	dc   machine.Pin // Data/Command Control
 	rst  machine.Pin // Hardware Reset
@@ -46,15 +47,25 @@ func (c *CrowPanel579) xyIndex(x, y int16) (byteIndex uint32, bitIndex uint8) {
 	return
 }
 
-func NewCrowPanel579(bus drivers.SPI, csPin, dcPin, rstPin, busyPin machine.Pin) CrowPanel579 {
+func (c *CrowPanel579) Power(on bool) {
+	if on {
+		c.pwr.High()
+	} else {
+		c.pwr.Low()
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+
+func NewCrowPanel579(bus drivers.SPI, pwrPin, csPin, dcPin, rstPin, busyPin machine.Pin) CrowPanel579 {
 
 	csPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	dcPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	rstPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	busyPin.Configure(machine.PinConfig{Mode: machine.PinInputPulldown})
-
+	pwrPin.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	return CrowPanel579{
 		bus:    bus,
+		pwr:    pwrPin,
 		cs:     csPin,
 		dc:     dcPin,
 		rst:    rstPin,
